@@ -45,7 +45,7 @@ where
                         let reply = match msg.parse::<Command>() {
                             Ok(command) => match command {
                                 Command::Get { cell_identifier } => match sht.read() {
-                                    Ok(sht) => sht.get(cell_identifier),
+                                    Ok(sht) => sht.get(&cell_identifier),
                                     Err(e) => Reply::Error(e.to_string()),
                                 },
                                 Command::Set {
@@ -53,7 +53,7 @@ where
                                     cell_expr,
                                 } => {
                                     let mut sht_guard = sht.write().expect("lock error");
-                                    sht_guard.set(cell_identifier, cell_expr)
+                                    sht_guard.set(&cell_identifier, cell_expr)
                                 }
                             },
                             Err(e) => Reply::Error(e.to_string()),

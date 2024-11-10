@@ -53,7 +53,9 @@ where
                                     cell_expr,
                                 } => {
                                     let mut sht_guard = sht.write().expect("lock error");
-                                    sht_guard.set(&cell_identifier, cell_expr)
+                                    let reply = sht_guard.set(&cell_identifier, cell_expr);
+                                    // TODO update dependencies.
+                                    reply
                                 }
                             },
                             Err(e) => Reply::Error(e.to_string()),

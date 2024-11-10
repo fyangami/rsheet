@@ -5,7 +5,7 @@ use rsheet_lib::{
     command::CellIdentifier,
     replies::Reply,
 };
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, sync::{Arc, Mutex}};
 
 pub struct Sheet {
     cells: HashMap<u32, HashMap<u32, CellValue>>,
@@ -40,9 +40,7 @@ impl Sheet {
             }
         }
         // update all deps
-        self.handle_deps(ident, new_deps);
-        // update all ref value
-        self.update_all_refs(ident);
+        self.update_deps(ident, new_deps);
         let reply = match expr.evaluate(&vars) {
             Ok(value) => {
                 self.set_cell_value(ident, value.clone());
@@ -53,7 +51,8 @@ impl Sheet {
         return reply;
     }
 
-    fn handle_deps(&mut self, ident: &CellIdentifier, new_deps: HashSet<String>) {
+    fn update_deps(&mut self, ident: &CellIdentifier, new_deps: HashSet<String>) {
+        // TODO circular dep
         let ident_name = Self::ident_to_name(ident);
         // handle prev cell deps
         self.dep_map
@@ -76,9 +75,9 @@ impl Sheet {
         });
     }
     
-    fn update_all_refs(&mut self, ident: &CellIdentifier) {
+    pub fn update_all_dependencies(_sht: Arc<Mutex<Sheet>>, ident: &CellIdentifier) {
         // TODO
-        let _ = Self::ident_to_name(ident);
+        let _ident_name = Self::ident_to_name(ident);
     }
 
     fn ident_to_name(ident: &CellIdentifier) -> String {

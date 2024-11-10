@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 pub struct Sheet {
     cells: HashMap<u32, HashMap<u32, CellValue>>,
+    dep_map: HashMap<String, HashSet<String>>,
+    ref_map: HashMap<String, HashSet<String>>,
 }
 
 const LIST_MATRIX_SEPARATOR: char = '_';
@@ -17,31 +19,66 @@ impl Sheet {
     pub fn new() -> Sheet {
         Sheet {
             cells: HashMap::new(),
+            dep_map: HashMap::new(),
+            ref_map: HashMap::new(),
         }
     }
 
     pub fn set(&mut self, ident: &CellIdentifier, expr: String) -> Reply {
         let expr = cell_expr::CellExpr::new(&expr);
         let mut vars = HashMap::new();
-        let mut dep_cells = HashSet::new();
+        let mut new_deps = HashSet::new();
         for name in expr.find_variable_names() {
             match self.name_to_cell_values(&name) {
                 Ok((idents, argument)) => {
                     vars.insert(name, argument);
-                    dep_cells.extend(idents);
+                    new_deps.extend(idents.iter().map(Self::ident_to_name));
                 }
                 Err(err) => {
                     return Reply::Error(err);
                 }
             }
         }
-        match expr.evaluate(&vars) {
+        // update all deps
+        self.handle_deps(ident, new_deps);
+        // update all ref value
+        self.update_all_refs(ident);
+        let reply = match expr.evaluate(&vars) {
             Ok(value) => {
                 self.set_cell_value(ident, value.clone());
                 Reply::Value(Self::ident_to_name(ident), value)
             }
             Err(_) => Reply::Error("Value dependent error value".to_string()),
-        }
+        };
+        return reply;
+    }
+
+    fn handle_deps(&mut self, ident: &CellIdentifier, new_deps: HashSet<String>) {
+        let ident_name = Self::ident_to_name(ident);
+        // handle prev cell deps
+        self.dep_map
+            .entry(ident_name.clone())
+            .or_insert_with(HashSet::new);
+        let cell_deps = self.dep_map.get(&ident_name).expect("created above");
+        cell_deps.iter().for_each(|dep| {
+            let refs = self.ref_map.entry(dep.to_owned()).or_insert_with(HashSet::new);
+            refs.remove(dep);
+        });
+        let cell_deps = self.dep_map.get_mut(&ident_name).expect("created above");
+        // handle new cell deps
+        *cell_deps = new_deps;
+        cell_deps.iter().for_each(|dep| {
+            self.ref_map
+                .entry(dep.to_owned())
+                .or_insert_with(HashSet::new);
+            let refs = self.ref_map.get_mut(dep).expect("created above");
+            refs.insert(ident_name.to_owned());
+        });
+    }
+    
+    fn update_all_refs(&mut self, ident: &CellIdentifier) {
+        // TODO
+        let _ = Self::ident_to_name(ident);
     }
 
     fn ident_to_name(ident: &CellIdentifier) -> String {

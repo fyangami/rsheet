@@ -29,6 +29,7 @@ struct SheetCell {
 }
 
 const LIST_MATRIX_SEPARATOR: char = '_';
+pub const DEPENDENTS_ON_ERROR: &str = "DEPENDENTS ON ERROR!";
 
 impl Sheet {
     pub fn new_sheet() -> Arc<Sheet> {
@@ -49,7 +50,10 @@ impl Sheet {
                 _ => return,
             }
         });
-        sht.update_dep_hdl.lock().expect("must held lock").replace(hdl);
+        sht.update_dep_hdl
+            .lock()
+            .expect("must held lock")
+            .replace(hdl);
         sht
     }
 
@@ -78,8 +82,7 @@ impl Sheet {
 
         let val = expr
             .evaluate(&vars)
-            .map_err(|_| "evaluate error".to_string())?;
-
+            .unwrap_or_else(|_| CellValue::Error(DEPENDENTS_ON_ERROR.to_string()));
         // update cell
         let update_dep_require = match self.get(&ident) {
             Ok(Some(cell)) => {
@@ -120,7 +123,9 @@ impl Sheet {
             }
         }
         // synchronizing all refs
-        self.dep_update_tx.send(Some(ident)).map_err(|e| e.to_string())?;
+        self.dep_update_tx
+            .send(Some(ident))
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -243,7 +248,8 @@ impl Sheet {
                     let mut col_vector = Vec::new();
                     for row in start_ident.row..=end_ident.row {
                         let ident = CellIdentifier { col, row };
-                        col_vector.push(self.get_cell_value(&ident)?);
+                        let cell = self.get_cell_value(&ident)?;
+                        col_vector.push(cell);
                         idents.push(ident);
                     }
                     matrix.push(col_vector);

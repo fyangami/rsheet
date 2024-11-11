@@ -3,7 +3,7 @@ use rsheet_lib::connect::{
     Connection, Manager, ReadMessageResult, Reader, WriteMessageResult, Writer,
 };
 use rsheet_lib::replies::Reply;
-use sheet::Sheet;
+use sheet::{Sheet, DEPENDENTS_ON_ERROR};
 use std::collections::HashSet;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -47,10 +47,21 @@ where
                             Ok(command) => match command {
                                 Command::Get { cell_identifier } => {
                                     match sht.sheet_get(&cell_identifier) {
-                                        Ok(v) => Some(Reply::Value(
-                                            Sheet::ident_to_name(&cell_identifier),
-                                            v,
-                                        )),
+                                        Ok(v) => Some(
+                                            if v.is_error()
+                                                && v.to_string().eq(&format!(
+                                                    "Error: \"{}\"",
+                                                    DEPENDENTS_ON_ERROR
+                                                ))
+                                            {
+                                                Reply::Error(v.to_string())
+                                            } else {
+                                                Reply::Value(
+                                                    Sheet::ident_to_name(&cell_identifier),
+                                                    v,
+                                                )
+                                            },
+                                        ),
                                         Err(e) => Some(Reply::Error(e)),
                                     }
                                 }

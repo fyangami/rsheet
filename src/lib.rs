@@ -6,7 +6,7 @@ use rsheet_lib::replies::Reply;
 use sheet::Sheet;
 use std::collections::HashSet;
 use std::error::Error;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 mod sheet;
@@ -18,7 +18,7 @@ where
     // This initiates a single client connection, and reads and writes messages
     // indefinitely.
 
-    let sht = Arc::new(RwLock::new(Sheet::new()));
+    let sht = Sheet::new_sheet();
     let id_sets: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     loop {
         let (mut recv, mut send) = match manager.accept_new_connection() {
@@ -44,36 +44,41 @@ where
                     ReadMessageResult::Message(msg) => {
                         let reply = match msg.parse::<Command>() {
                             Ok(command) => match command {
-                                Command::Get { cell_identifier } => match sht.read() {
-                                    Ok(sht) => sht.get_cell(&cell_identifier),
-                                    Err(e) => Reply::Error(e.to_string()),
-                                },
+                                Command::Get { cell_identifier } => {
+                                    match sht.sheet_get(&cell_identifier) {
+                                        Ok(v) => Some(Reply::Value(
+                                            Sheet::ident_to_name(&cell_identifier),
+                                            v,
+                                        )),
+                                        _ => Some(Reply::Error("cell get error".to_string())),
+                                    }
+                                }
                                 Command::Set {
                                     cell_identifier,
                                     cell_expr,
-                                } => {
-                                    let mut sht_guard = sht.write().expect("lock error");
-                                    let reply = sht_guard.set(&cell_identifier, cell_expr);
-                                    // TODO update dependencies.
-                                    reply
-                                }
+                                } => match sht.sheet_set_now(&cell_identifier, cell_expr) {
+                                    Ok(()) => None,
+                                    _ => Some(Reply::Error("cell set error".to_string())),
+                                },
                             },
-                            Err(e) => Reply::Error(e.to_string()),
+                            Err(e) => Some(Reply::Error(e.to_string())),
                         };
-                        match send.write_message(reply) {
-                            WriteMessageResult::Ok => {
-                                // Message successfully sent, continue.
-                            }
-                            WriteMessageResult::ConnectionClosed => {
-                                // The connection was closed. This is not an error, but
-                                // should terminate this connection.
-                                break;
-                            }
-                            WriteMessageResult::Err(_) => {
-                                // An unexpected error was encountered.
-                                break;
-                            }
-                        };
+                        if let Some(reply) = reply {
+                            match send.write_message(reply) {
+                                WriteMessageResult::Ok => {
+                                    // Message successfully sent, continue.
+                                }
+                                WriteMessageResult::ConnectionClosed => {
+                                    // The connection was closed. This is not an error, but
+                                    // should terminate this connection.
+                                    break;
+                                }
+                                WriteMessageResult::Err(_) => {
+                                    // An unexpected error was encountered.
+                                    break;
+                                }
+                            };
+                        }
                     }
                     ReadMessageResult::ConnectionClosed => {
                         // The connection was closed. This is not an error, but
@@ -88,9 +93,6 @@ where
             }
             let mut id_sets_guard = id_sets_cloned.lock().expect("lock error");
             id_sets_guard.remove(&send.id());
-        });
-        thread::spawn(move || {
-            
         });
     }
 }

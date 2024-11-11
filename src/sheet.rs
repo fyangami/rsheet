@@ -7,18 +7,23 @@ use rsheet_lib::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{
+        mpsc::{channel, Sender},
+        Arc, RwLock,
+    },
+    thread,
     time::SystemTime,
 };
 
 pub struct Sheet {
     cells: Arc<RwLock<HashMap<u32, HashMap<u32, Arc<RwLock<SheetCell>>>>>>,
+    dep_update_tx: Sender<CellIdentifier>,
 }
 
 struct SheetCell {
     value: CellValue,
-    deps: HashSet<String>,
-    refs: HashSet<String>,
+    deps: HashSet<CellIdentifier>,
+    refs: HashSet<CellIdentifier>,
     last_modify: u64,
     expr_raw: String,
 }
@@ -26,41 +31,79 @@ struct SheetCell {
 const LIST_MATRIX_SEPARATOR: char = '_';
 
 impl Sheet {
-    pub fn new() -> Sheet {
-        Sheet {
+    pub fn new_sheet() -> Arc<Sheet> {
+        let (tx, rx) = channel();
+
+        let sht = Arc::new(Sheet {
             cells: Arc::new(RwLock::new(HashMap::new())),
-        }
+            dep_update_tx: tx,
+        });
+        let sht_cloned = sht.clone();
+        thread::spawn(move || loop {
+            match rx.recv() {
+                Ok(ident) => {
+                    sht_cloned.sheet_set(&ident, "".to_string(), current_ts());
+                }
+                _ => return,
+            }
+        });
+        sht
     }
 
     pub fn sheet_get(&self, ident: &CellIdentifier) -> Result<CellValue, String> {
         self.get_cell_value(ident)
     }
 
-    pub fn sheet_set(&mut self, ident: &CellIdentifier, expr_raw: String) -> Result<(), String> {
+    pub fn sheet_set_now(&self, ident: &CellIdentifier, expr_raw: String) -> Result<(), String> {
+        self.sheet_set(ident, expr_raw, current_ts())
+    }
+
+    pub fn sheet_set(
+        &self,
+        ident: &CellIdentifier,
+        expr_raw: String,
+        last_modify: u64,
+    ) -> Result<(), String> {
         let expr = cell_expr::CellExpr::new(&expr_raw);
         let mut vars = HashMap::new();
         let mut new_deps = HashSet::new();
         for name in expr.find_variable_names() {
             let (idents, arguments) = self.name_to_cell_values(&name)?;
             vars.insert(name, arguments);
+            new_deps.extend(idents);
         }
         let val = expr
             .evaluate(&vars)
             .map_err(|_| "evaluate error".to_string())?;
-        let ts = current_ts();
         // update cell
         let cell = match self.get(ident) {
             Ok(Some(cell)) => {
                 // update cell
-                let mut cell_guard = cell.write().map_err(|e| e.to_string())?;
-                cell
+                let cell_guard = &mut cell.write().map_err(|e| e.to_string())?;
+                for ele in cell_guard.deps.iter() {
+                    match self.get(ele)? {
+                        Some(dep_cell) => {
+                            let dep_cell_guard =
+                                &mut dep_cell.write().map_err(|e| e.to_string())?;
+                            dep_cell_guard.refs.remove(ident);
+                        }
+                        _ => {}
+                    }
+                }
+                cell_guard.deps = new_deps;
+                if cell_guard.last_modify <= last_modify {
+                    cell_guard.value = val;
+                    cell_guard.last_modify = last_modify;
+                }
+                cell_guard.expr_raw = expr_raw;
+                cell.clone()
             }
             Ok(None) => {
                 let cell = Arc::new(RwLock::new(SheetCell {
                     value: val,
                     deps: new_deps,
                     refs: HashSet::new(),
-                    last_modify: ts,
+                    last_modify: last_modify,
                     expr_raw,
                 }));
                 self.put(ident, cell.clone())?;
@@ -70,25 +113,49 @@ impl Sheet {
                 return Err(e);
             }
         };
-        if self.check_circular_dependency(
-            &mut HashSet::new(),
-            Self::ident_to_name(ident),
-            &new_deps,
-        ) {
-            return Reply::Error("circular dependency detected".to_string());
+        // renew deps links
+        {
+            let cell_guard = &mut cell.write().map_err(|e| e.to_string())?;
+
+            for ele in cell_guard.deps.iter() {
+                match self.get(&ele)? {
+                    Some(dep_cell) => {
+                        let dep_cell_guard = &mut dep_cell.write().map_err(|e| e.to_string())?;
+                        dep_cell_guard.refs.insert(ident.clone());
+                    }
+                    _ => return Err("dep cell not found".to_string()),
+                }
+            }
         }
-        // let reply = match expr.evaluate(&vars) {
-        //     Ok(value) => {
-        //         self.set_cell_value(ident, value.clone());
-        //         Reply::Value(Self::ident_to_name(ident), value)
-        //     }
-        //     Err(_) => Reply::Error("Value dependent error value".to_string()),
-        // };
-        // return reply;
-        todo!()
+        // check circular dependency
+        if self.check_circular_dependency(&mut HashSet::new(), cell.clone(), &ident)? {
+            return Err("circular dependency detected".to_string());
+        }
+
+        // synchronizing all refs
+        self.dep_update_tx.send(ident.to_owned());
+        Ok(())
     }
 
-    fn update_cell_dependents(cell: Arc<RwLock<SheetCell>>, new_deps: HashSet<String>) {}
+    fn update_cell_dependents(&self, cell: Arc<RwLock<SheetCell>>, last_modify: u64) {
+        match &cell.read() {
+            Ok(cell) => {
+                cell.refs.iter().for_each(|ident| match self.get(ident) {
+                    Ok(Some(cell)) => {
+                        match cell.read() {
+                            Ok(cell) => {
+                                self.sheet_set(ident, cell.expr_raw.to_owned(), last_modify);
+                            }
+                            _ => {}
+                        }
+                        self.update_cell_dependents(cell, last_modify);
+                    }
+                    _ => {}
+                });
+            }
+            _ => return,
+        }
+    }
 
     fn put(&self, ident: &CellIdentifier, new_cell: Arc<RwLock<SheetCell>>) -> Result<(), String> {
         let mut cells = self.cells.write().map_err(|e| e.to_string())?;
@@ -108,61 +175,30 @@ impl Sheet {
         }
     }
 
-    fn update_deps(&mut self, ident: &CellIdentifier, new_deps: &HashSet<String>) {
-        // TODO circular dep
-        let ident_name = Self::ident_to_name(ident);
-        // handle prev cell deps
-        self.dep_map
-            .entry(ident_name.clone())
-            .or_insert_with(HashSet::new);
-        let cell_deps = self.dep_map.get(&ident_name).expect("created above");
-        cell_deps.iter().for_each(|dep| {
-            let refs = self
-                .ref_map
-                .entry(dep.to_owned())
-                .or_insert_with(HashSet::new);
-            refs.remove(dep);
-        });
-        let cell_deps = self.dep_map.get_mut(&ident_name).expect("created above");
-        // handle new cell deps
-        *cell_deps = new_deps.to_owned();
-        cell_deps.iter().for_each(|dep| {
-            self.ref_map
-                .entry(dep.to_owned())
-                .or_insert_with(HashSet::new);
-            let refs = self.ref_map.get_mut(dep).expect("created above");
-            refs.insert(ident_name.to_owned());
-        });
-    }
-
     pub fn check_circular_dependency(
         &self,
-        visited: &mut HashSet<String>,
-        cell_name: String,
-        cell_deps: &HashSet<String>,
-    ) -> bool {
-        if visited.contains(&cell_name) {
-            return true;
+        visited: &mut HashSet<CellIdentifier>,
+        cell: Arc<RwLock<SheetCell>>,
+        ident: &CellIdentifier,
+    ) -> Result<bool, String> {
+        let cell = cell.read().map_err(|e| e.to_string())?;
+        if visited.contains(ident) {
+            return Ok(true);
         }
-        visited.insert(cell_name);
-        for dep in cell_deps {
-            let exits = match self.dep_map.get(dep) {
-                Some(sub_deps) => self.check_circular_dependency(visited, dep.to_owned(), sub_deps),
+        visited.insert(ident.to_owned());
+        for dep in cell.deps.iter() {
+            let exits = match self.get(&dep)? {
+                Some(dep_cell) => self.check_circular_dependency(visited, dep_cell, dep)?,
                 _ => false,
             };
             if exits {
-                return true;
+                return Ok(true);
             }
         }
-        return false;
+        return Ok(false);
     }
 
-    pub fn update_all_dependencies(sht: Arc<RwLock<Sheet>>, ident: &CellIdentifier) {
-        // TODO
-        let ident_name = Self::ident_to_name(ident);
-    }
-
-    fn ident_to_name(ident: &CellIdentifier) -> String {
+    pub fn ident_to_name(ident: &CellIdentifier) -> String {
         format!(
             "{}{}",
             cells::column_number_to_name(ident.col),

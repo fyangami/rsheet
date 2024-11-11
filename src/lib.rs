@@ -56,7 +56,7 @@ where
                                 Command::Set {
                                     cell_identifier,
                                     cell_expr,
-                                } => match sht.sheet_set_now(&cell_identifier, cell_expr) {
+                                } => match sht.sheet_set_now(cell_identifier, cell_expr) {
                                     Ok(()) => None,
                                     Err(e) => Some(Reply::Error(e)),
                                 },

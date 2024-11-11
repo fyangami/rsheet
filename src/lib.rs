@@ -45,7 +45,7 @@ where
                         let reply = match msg.parse::<Command>() {
                             Ok(command) => match command {
                                 Command::Get { cell_identifier } => match sht.read() {
-                                    Ok(sht) => sht.get(&cell_identifier),
+                                    Ok(sht) => sht.get_cell(&cell_identifier),
                                     Err(e) => Reply::Error(e.to_string()),
                                 },
                                 Command::Set {
@@ -88,6 +88,9 @@ where
             }
             let mut id_sets_guard = id_sets_cloned.lock().expect("lock error");
             id_sets_guard.remove(&send.id());
+        });
+        thread::spawn(move || {
+            
         });
     }
 }

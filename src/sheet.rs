@@ -3,7 +3,6 @@ use rsheet_lib::{
     cell_value::CellValue,
     cells,
     command::CellIdentifier,
-    replies::Reply,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -17,7 +16,7 @@ use std::{
 
 pub struct Sheet {
     cells: Arc<RwLock<HashMap<u32, HashMap<u32, Arc<RwLock<SheetCell>>>>>>,
-    dep_update_tx: Sender<CellIdentifier>,
+    dep_update_tx: Sender<Arc<RwLock<SheetCell>>>,
 }
 
 struct SheetCell {
@@ -41,8 +40,8 @@ impl Sheet {
         let sht_cloned = sht.clone();
         thread::spawn(move || loop {
             match rx.recv() {
-                Ok(ident) => {
-                    sht_cloned.sheet_set(&ident, "".to_string(), current_ts());
+                Ok(cell) => {
+                    sht_cloned.update_cell_dependents(cell, current_ts());
                 }
                 _ => return,
             }
@@ -133,7 +132,7 @@ impl Sheet {
         }
 
         // synchronizing all refs
-        self.dep_update_tx.send(ident.to_owned());
+        self.dep_update_tx.send(cell).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -144,16 +143,27 @@ impl Sheet {
                     Ok(Some(cell)) => {
                         match cell.read() {
                             Ok(cell) => {
-                                self.sheet_set(ident, cell.expr_raw.to_owned(), last_modify);
+                                let _ = self
+                                    .sheet_set(ident, cell.expr_raw.to_owned(), last_modify)
+                                    .inspect_err(|e| {
+                                        log::error!("update cell dependents failed: {}", e)
+                                    });
                             }
-                            _ => {}
+                            Err(e) => {
+                                log::error!("update cell dependents failed: {}", e)
+                            }
                         }
                         self.update_cell_dependents(cell, last_modify);
                     }
-                    _ => {}
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::error!("update cell dependents failed: {}", e)
+                    }
                 });
             }
-            _ => return,
+            Err(e) => {
+                log::error!("update cell dependents failed: {}", e)
+            }
         }
     }
 
@@ -175,7 +185,7 @@ impl Sheet {
         }
     }
 
-    pub fn check_circular_dependency(
+    fn check_circular_dependency(
         &self,
         visited: &mut HashSet<CellIdentifier>,
         cell: Arc<RwLock<SheetCell>>,
@@ -271,13 +281,11 @@ fn current_ts() -> u64 {
     let since_the_epoch = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
-    // 获取秒数并转换为u64
+
     let timestamp_secs: u64 = since_the_epoch.as_secs();
 
-    // 获取纳秒部分并转换为u64
     let timestamp_nanos: u64 = since_the_epoch.subsec_nanos() as u64;
 
-    // 组合秒数和纳秒部分（如果需要精确到纳秒的时间戳）
     let timestamp_combined: u64 = timestamp_secs * 1_000_000_000 + timestamp_nanos;
     return timestamp_combined;
 }

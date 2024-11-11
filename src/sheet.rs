@@ -9,16 +9,17 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         mpsc::{channel, Sender},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
-    thread,
+    thread::{self, JoinHandle},
     time::SystemTime,
 };
 
 pub struct Sheet {
     cells: Arc<RwLock<HashMap<u32, HashMap<u32, Arc<RwLock<SheetCell>>>>>>,
     dep_graph: Arc<RwLock<DiGraphMap<CellIdentifier, ()>>>,
-    dep_update_tx: Sender<CellIdentifier>,
+    pub dep_update_tx: Sender<Option<CellIdentifier>>,
+    pub update_dep_hdl: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 struct SheetCell {
@@ -37,16 +38,18 @@ impl Sheet {
             cells: Arc::new(RwLock::new(HashMap::new())),
             dep_update_tx: tx,
             dep_graph: Arc::new(RwLock::new(DiGraphMap::new())),
+            update_dep_hdl: Arc::new(Mutex::new(None)),
         });
         let sht_cloned = sht.clone();
-        thread::spawn(move || loop {
+        let hdl = thread::spawn(move || loop {
             match rx.recv() {
-                Ok(cell) => {
+                Ok(Some(cell)) => {
                     sht_cloned.update_cell_dependents(cell, current_ts());
                 }
                 _ => return,
             }
         });
+        sht.update_dep_hdl.lock().expect("must held lock").replace(hdl);
         sht
     }
 
@@ -117,7 +120,7 @@ impl Sheet {
             }
         }
         // synchronizing all refs
-        self.dep_update_tx.send(ident).map_err(|e| e.to_string())?;
+        self.dep_update_tx.send(Some(ident)).map_err(|e| e.to_string())?;
         Ok(())
     }
 

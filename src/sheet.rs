@@ -1,4 +1,4 @@
-use petgraph::prelude::DiGraphMap;
+use petgraph::{prelude::DiGraphMap, Direction};
 use rsheet_lib::{
     cell_expr::{self, CellArgument},
     cell_value::CellValue,
@@ -78,17 +78,19 @@ impl Sheet {
             .map_err(|_| "evaluate error".to_string())?;
 
         // update cell
-        let (_, update_dep_require) = match self.get(&ident) {
+        let update_dep_require = match self.get(&ident) {
             Ok(Some(cell)) => {
                 // update cell
                 let cell_guard = &mut cell.write().map_err(|e| e.to_string())?;
                 if cell_guard.last_modify <= last_modify {
                     cell_guard.value = val;
                     cell_guard.last_modify = last_modify;
+                    let update_dep_require = cell_guard.expr_raw != expr_raw;
+                    cell_guard.expr_raw = expr_raw;
+                    update_dep_require
+                } else {
+                    false
                 }
-                let update_dep_require = cell_guard.expr_raw != expr_raw;
-                cell_guard.expr_raw = expr_raw;
-                (cell.clone(), update_dep_require)
             }
             Ok(None) => {
                 let cell = Arc::new(RwLock::new(SheetCell {
@@ -97,7 +99,7 @@ impl Sheet {
                     expr_raw,
                 }));
                 self.put(&ident, cell.clone())?;
-                (cell, true)
+                true
             }
             Err(e) => {
                 return Err(e);
@@ -143,7 +145,9 @@ impl Sheet {
 
     fn update_cell_dependents(&self, ident: CellIdentifier, last_modify: u64) {
         let refs: HashSet<CellIdentifier> = match self.dep_graph.read() {
-            Ok(graph) => graph.neighbors(ident).collect(),
+            Ok(graph) => graph
+                .neighbors_directed(ident, Direction::Incoming)
+                .collect(),
             Err(e) => {
                 log::error!("update cell dependents failed: {}", e);
                 return;

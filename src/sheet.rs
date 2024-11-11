@@ -1,3 +1,4 @@
+use petgraph::{prelude::DiGraphMap, Direction};
 use rsheet_lib::{
     cell_expr::{self, CellArgument},
     cell_value::CellValue,
@@ -16,13 +17,12 @@ use std::{
 
 pub struct Sheet {
     cells: Arc<RwLock<HashMap<u32, HashMap<u32, Arc<RwLock<SheetCell>>>>>>,
+    dep_graph: Arc<RwLock<DiGraphMap<CellIdentifier, ()>>>,
     dep_update_tx: Sender<Arc<RwLock<SheetCell>>>,
 }
 
 struct SheetCell {
     value: CellValue,
-    deps: HashSet<CellIdentifier>,
-    refs: HashSet<CellIdentifier>,
     last_modify: u64,
     expr_raw: String,
 }
@@ -36,6 +36,7 @@ impl Sheet {
         let sht = Arc::new(Sheet {
             cells: Arc::new(RwLock::new(HashMap::new())),
             dep_update_tx: tx,
+            dep_graph: Arc::new(RwLock::new(DiGraphMap::new())),
         });
         let sht_cloned = sht.clone();
         thread::spawn(move || loop {
@@ -71,25 +72,20 @@ impl Sheet {
             vars.insert(name, arguments);
             new_deps.extend(idents);
         }
+
         let val = expr
             .evaluate(&vars)
             .map_err(|_| "evaluate error".to_string())?;
+
+        // update dep graph
+        self.update_dep_graph(ident.clone(), new_deps)?;
+        // detect graph
+
         // update cell
         let cell = match self.get(ident) {
             Ok(Some(cell)) => {
                 // update cell
                 let cell_guard = &mut cell.write().map_err(|e| e.to_string())?;
-                for ele in cell_guard.deps.iter() {
-                    match self.get(ele)? {
-                        Some(dep_cell) => {
-                            let dep_cell_guard =
-                                &mut dep_cell.write().map_err(|e| e.to_string())?;
-                            dep_cell_guard.refs.remove(ident);
-                        }
-                        _ => {}
-                    }
-                }
-                cell_guard.deps = new_deps;
                 if cell_guard.last_modify <= last_modify {
                     cell_guard.value = val;
                     cell_guard.last_modify = last_modify;
@@ -100,8 +96,6 @@ impl Sheet {
             Ok(None) => {
                 let cell = Arc::new(RwLock::new(SheetCell {
                     value: val,
-                    deps: new_deps,
-                    refs: HashSet::new(),
                     last_modify: last_modify,
                     expr_raw,
                 }));
@@ -112,42 +106,53 @@ impl Sheet {
                 return Err(e);
             }
         };
-        // renew deps links
-        {
-            let cell_guard = &mut cell.write().map_err(|e| e.to_string())?;
-
-            for ele in cell_guard.deps.iter() {
-                match self.get(&ele)? {
-                    Some(dep_cell) => {
-                        let dep_cell_guard = &mut dep_cell.write().map_err(|e| e.to_string())?;
-                        dep_cell_guard.refs.insert(ident.clone());
-                    }
-                    _ => return Err("dep cell not found".to_string()),
-                }
-            }
-        }
         // check circular dependency
-        if self.check_circular_dependency(&mut HashSet::new(), cell.clone(), &ident)? {
+        if self.check_circular_dependency(&mut HashSet::new(), ident)? {
             return Err("circular dependency detected".to_string());
         }
-
         // synchronizing all refs
         self.dep_update_tx.send(cell).map_err(|e| e.to_string())?;
         Ok(())
     }
 
+    fn update_dep_graph(
+        &self,
+        ident: CellIdentifier,
+        new_deps: HashSet<CellIdentifier>,
+    ) -> Result<(), String> {
+        let mut graph = self.dep_graph.write().map_err(|e| e.to_string())?;
+        if !graph.contains_node(ident) {
+            graph.add_node(ident);
+        }
+        for ele in graph.neighbors(ident).collect::<Vec<CellIdentifier>>() {
+            graph.remove_edge(ident, ele);
+        }
+        for ele in new_deps {
+            if !graph.contains_node(ele) {
+                graph.add_node(ele);
+            }
+            graph.add_edge(ident, ele, ());
+        }
+        Ok(())
+    }
+
+    // TODO
     fn update_cell_dependents(&self, cell: Arc<RwLock<SheetCell>>, last_modify: u64) {
-        match &cell.read() {
+        match cell.read() {
             Ok(cell) => {
-                cell.refs.iter().for_each(|ident| match self.get(ident) {
+                let refs = cell.refs.to_owned();
+                drop(cell);
+                refs.iter().for_each(|ident| match self.get(ident) {
                     Ok(Some(cell)) => {
                         match cell.read() {
                             Ok(cell) => {
-                                let _ = self
-                                    .sheet_set(ident, cell.expr_raw.to_owned(), last_modify)
-                                    .inspect_err(|e| {
+                                let expr_raw = cell.expr_raw.to_owned();
+                                drop(cell);
+                                let _ = self.sheet_set(ident, expr_raw, last_modify).inspect_err(
+                                    |e: &String| {
                                         log::error!("update cell dependents failed: {}", e)
-                                    });
+                                    },
+                                );
                             }
                             Err(e) => {
                                 log::error!("update cell dependents failed: {}", e)
@@ -188,21 +193,19 @@ impl Sheet {
     fn check_circular_dependency(
         &self,
         visited: &mut HashSet<CellIdentifier>,
-        cell: Arc<RwLock<SheetCell>>,
         ident: &CellIdentifier,
     ) -> Result<bool, String> {
-        let cell = cell.read().map_err(|e| e.to_string())?;
         if visited.contains(ident) {
             return Ok(true);
         }
         visited.insert(ident.to_owned());
-        for dep in cell.deps.iter() {
-            let exits = match self.get(&dep)? {
-                Some(dep_cell) => self.check_circular_dependency(visited, dep_cell, dep)?,
-                _ => false,
-            };
-            if exits {
-                return Ok(true);
+        let graph = self.dep_graph.read().map_err(|e| e.to_string())?;
+        for dep in graph.neighbors(ident.clone()) {
+            match self.check_circular_dependency(visited, &dep) {
+                Ok(exits) if exits => {
+                    return Ok(true);
+                }
+                _ => {}
             }
         }
         return Ok(false);

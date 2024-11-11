@@ -50,7 +50,7 @@ where
                                             Sheet::ident_to_name(&cell_identifier),
                                             v,
                                         )),
-                                        _ => Some(Reply::Error("cell get error".to_string())),
+                                        Err(e) => Some(Reply::Error(e)),
                                     }
                                 }
                                 Command::Set {
@@ -58,10 +58,10 @@ where
                                     cell_expr,
                                 } => match sht.sheet_set_now(&cell_identifier, cell_expr) {
                                     Ok(()) => None,
-                                    _ => Some(Reply::Error("cell set error".to_string())),
+                                    Err(e) => Some(Reply::Error(e)),
                                 },
                             },
-                            Err(e) => Some(Reply::Error(e.to_string())),
+                            Err(e) => Some(Reply::Error(e)),
                         };
                         if let Some(reply) = reply {
                             match send.write_message(reply) {
